@@ -132,6 +132,7 @@ io.on("connection", (socket) => {
         encoding: "WEBM_OPUS",
         sampleRateHertz: 48000,
         languageCode: "vi-VN",
+        alternative_language_codes: ["en-US"],
         model: "latest_long", // Batch thì dùng model xịn nhất
         enableSpeakerDiarization: true, // ✅ Batch HỖ TRỢ cái này!
         diarizationConfig: {
