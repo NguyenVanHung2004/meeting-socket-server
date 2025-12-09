@@ -1,35 +1,28 @@
 require('dotenv').config();
 const { Server } = require("socket.io");
 const speech = require("@google-cloud/speech");
-const path = require("path"); // Thêm thư viện này để xử lý đường dẫn file chính xác
+const path = require("path");
 const fs = require("fs");
-const http = require("http"); // Thêm cái này để tạo server http chuẩn
-// [QUAN TRỌNG] Render sẽ cấp PORT qua biến môi trường, nếu không có thì dùng 8080
-const PORT = process.env.PORT || 8080;
+const http = require("http");
 
+const PORT = process.env.PORT || 8080;
 const KEY_FILE_PATH = path.join(__dirname, "google-key.json");
 
-// Kiểm tra xem file key có tồn tại không (để debug)
 if (!fs.existsSync(KEY_FILE_PATH)) {
     console.error("❌ LỖI: Không tìm thấy file google-key.json!");
 }
-// --- SỬA ĐOẠN NÀY ---
-// Thay vì đọc từ env, ta đọc thẳng từ file json
+
 const speechClient = new speech.SpeechClient({
   keyFilename: KEY_FILE_PATH
 });
 
-// Tạo HTTP Server (Render cần cái này để Health Check)
 const httpServer = http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Socket Server is Running!');
 });
 
-
-const io = new Server(httpServer, { // Gắn socket vào httpServer
+const io = new Server(httpServer, {
   cors: {
-    // Cho phép Frontend của bạn kết nối. 
-    // Khi deploy Frontend, hãy thay dấu "*" bằng domain thật để bảo mật.
     origin: "*", 
     methods: ["GET", "POST"]
   },
@@ -40,41 +33,37 @@ console.log(`🚀 Socket Server đang chạy trên cổng ${PORT}`);
 
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
+  
   let recognizeStream = null;
+  let restartTimeout = null;
+  let savedRequest = null; // Biến để lưu cấu hình, dùng cho việc restart
 
-  socket.on("start-google-stream", () => {
-    console.log("🎙️ Bắt đầu stream Google..."); // Log để biết có chạy vào đây không
+  // --- HÀM KHỞI TẠO STREAM (Tách riêng để gọi lại) ---
+  const startStream = () => {
+    // 1. Dọn dẹp stream cũ (nếu có)
+    if (recognizeStream) {
+        recognizeStream.end();
+        recognizeStream.removeAllListeners();
+        recognizeStream = null;
+    }
+    if (restartTimeout) clearTimeout(restartTimeout);
 
-    const request = {
-      config: {
-        encoding: "WEBM_OPUS", // Giữ nguyên WEBM_OPUS để khớp với Client
-        sampleRateHertz: 48000,
-        languageCode: "vi-VN",
-        
-        // 1. ✅ BẬT LẠI DIARIZATION (Theo ý bạn)
-        enableSpeakerDiarization: true,
-        diarizationConfig: {
-          minSpeakerCount: 1,
-          maxSpeakerCount: 5,
-        },
+    console.log("🔄 (Re)Starting Google Stream...");
 
-        // 2. ✅ ĐỔI MODEL: Dùng "default" thay vì "latest_long"
-        // "latest_long" rất chính xác nhưng xử lý rất nặng, dễ gây timeout khi bật Diarization.
-        // "default" (hoặc "command_and_search") phản hồi nhanh hơn, giúp giảm rớt chữ.
-        model: "latest_long",
-        enableWordTimeOffsets: true, 
-      },
-      interimResults: true,
-    };
-
+    // 2. Tạo Stream mới
     recognizeStream = speechClient
-      .streamingRecognize(request)
+      .streamingRecognize(savedRequest)
       .on("error", (err) => {
-        console.error("Google API Error:", err);
-        socket.emit("google-error", err.message);
+        // Nếu gặp lỗi quá hạn 305s (mã 11) -> Tự restart luôn
+        if (err.code === 11 || err.toString().includes("Exceeded maximum allowed stream duration")) {
+            console.warn("⚠️ Gặp lỗi giới hạn thời gian (305s), đang tự khởi động lại...");
+            startStream();
+        } else {
+            console.error("Google API Error:", err);
+            socket.emit("google-error", err.message);
+        }
       })
       .on("data", (data) => {
-        console.log("📦 RAW DATA:", JSON.stringify(data, null, 2));
         const result = data.results[0];
         if (result && result.alternatives[0]) {
             const transcript = result.alternatives[0].transcript;
@@ -82,45 +71,91 @@ io.on("connection", (socket) => {
             
             let speaker = 0;
             const words = result.alternatives[0].words;
-            // ✅ MỚI: Quét tất cả các từ trong câu, thấy có tag là lấy luôn
-            if (isFinal && words.length > 0) {
-                for (const word of words) {
-                    if (word.speakerTag) {
-                        speaker = word.speakerTag;
-                        break; // Tìm thấy rồi thì dừng
+            if (isFinal && words && words.length > 0) {
+                // Lấy speaker tag của từ cuối cùng cho chắc ăn
+                for (let i = words.length - 1; i >= 0; i--) {
+                    if (words[i].speakerTag) {
+                        speaker = words[i].speakerTag;
+                        break;
                     }
                 }
             }
            
-                console.log(`📝 Final Text: "${transcript}" | 🗣️ Speaker Tag: ${speaker}`);         
-            // Gửi lại cho Client
-            socket.emit("transcript-data", { text: transcript, isFinal, speaker });
+            socket.emit("transcript-data", { 
+                text: transcript, 
+                isFinal, 
+                speaker 
+            });
         }
       });
+
+    // 3. Đặt hẹn giờ "Tự sát" sau 290 giây (để né giới hạn 305 giây)
+    restartTimeout = setTimeout(() => {
+        console.log("⏰ Đã đến giới hạn an toàn (290s). Đang tái khởi động stream...");
+        startStream();
+    }, 290000); 
+  };
+
+  // --- XỬ LÝ SỰ KIỆN TỪ CLIENT ---
+
+  socket.on("start-google-stream", () => {
+    console.log("🎙️ Client yêu cầu bắt đầu ghi âm.");
+
+    // Lưu cấu hình vào biến global của socket này
+    savedRequest = {
+      config: {
+        encoding: "WEBM_OPUS",
+        sampleRateHertz: 48000,
+        languageCode: "vi-VN",
+        alternativeLanguageCodes: ["en-US"], 
+        enableSpeakerDiarization: true,
+        diarizationConfig: {
+          minSpeakerCount: 1,
+          maxSpeakerCount: 5,
+        },
+        model: "latest_long",
+        // model: "default", // Bạn có thể đổi về default nếu thấy latest_long bị chậm
+        useEnhanced: true,
+        enableWordTimeOffsets: true,
+        
+        // Metadata giúp Google hiểu ngữ cảnh (quan trọng)
+        metadata: {
+            interactionType: "PRESENTATION", // Hoặc DISCUSSION
+            microphoneDistance: "NEARFIELD", // Mic gần (Laptop/Tai nghe)
+            originalMediaType: "AUDIO",
+            recordingDeviceType: "PC",
+        },
+      },
+      interimResults: true,
+    };
+
+    // Gọi hàm bắt đầu
+    startStream();
   });
 
   socket.on("audio-chunk", (data) => {
-    // ❌ CŨ: if (recognizeStream) {
-    
-    // ✅ MỚI: Kiểm tra thêm điều kiện stream chưa bị hủy (destroyed)
+    // Chỉ ghi nếu stream đang mở và chưa bị hủy
     if (recognizeStream && !recognizeStream.destroyed) {
         try {
             recognizeStream.write(data);
         } catch (err) {
-            // Nếu lỡ có lỗi thì bỏ qua luôn, vì đằng nào cũng đang dừng rồi
-            console.warn("⚠️ Bỏ qua gói tin cuối do stream đã đóng.");
+            // Lỗi này thường xảy ra đúng lúc đang restart, bỏ qua được
+            // console.warn("⚠️ Lỗi ghi audio vào stream (đang restart?):", err.message);
         }
     }
   });
 
   socket.on("stop-google-stream", () => {
+    if (restartTimeout) clearTimeout(restartTimeout);
     if (recognizeStream) {
       recognizeStream.end();
       recognizeStream = null;
-      console.log("🛑 Đã dừng stream.");
+      console.log("🛑 Client dừng ghi âm.");
     }
   });
-  socket.on("google-batch-analyze", async (fileBuffer) => {
+
+  // ... (Phần xử lý Batch Analyze giữ nguyên code cũ của bạn) ...
+   socket.on("google-batch-analyze", async (fileBuffer) => {
     console.log(`📥 Nhận yêu cầu Batch: ${fileBuffer.length} bytes`);
 
     try {
@@ -185,7 +220,9 @@ io.on("connection", (socket) => {
       socket.emit("google-error", "Lỗi xử lý Batch: " + err.message);
     }
   });
+
   socket.on("disconnect", () => {
+    if (restartTimeout) clearTimeout(restartTimeout);
     if (recognizeStream) {
       recognizeStream.end();
       recognizeStream = null;
@@ -194,5 +231,4 @@ io.on("connection", (socket) => {
   });
 });
 
-console.log(`🚀 Socket Server đang chạy trên cổng ${PORT}`);
-httpServer.listen(PORT); // Đổi thành httpServer.listen
+httpServer.listen(PORT);
