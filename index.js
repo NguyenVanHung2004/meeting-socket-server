@@ -107,7 +107,6 @@ io.on("connection", (socket) => {
         encoding: "WEBM_OPUS",
         sampleRateHertz: 48000,
         languageCode: "vi-VN",
-        alternativeLanguageCodes: ["en-US"], 
         enableSpeakerDiarization: true,
         diarizationConfig: {
           minSpeakerCount: 1,
