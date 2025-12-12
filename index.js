@@ -107,23 +107,10 @@ io.on("connection", (socket) => {
         encoding: "WEBM_OPUS",
         sampleRateHertz: 48000,
         languageCode: "vi-VN",
-        enableSpeakerDiarization: true,
-        diarizationConfig: {
-          minSpeakerCount: 1,
-          maxSpeakerCount: 5,
-        },
         model: "latest_long",
         // model: "default", // Bạn có thể đổi về default nếu thấy latest_long bị chậm
-        useEnhanced: true,
+       
         enableWordTimeOffsets: true,
-        
-        // Metadata giúp Google hiểu ngữ cảnh (quan trọng)
-        metadata: {
-            interactionType: "PRESENTATION", // Hoặc DISCUSSION
-            microphoneDistance: "NEARFIELD", // Mic gần (Laptop/Tai nghe)
-            originalMediaType: "AUDIO",
-            recordingDeviceType: "PC",
-        },
       },
       interimResults: true,
     };
