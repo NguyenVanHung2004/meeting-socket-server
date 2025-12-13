@@ -89,11 +89,18 @@ io.on("connection", (socket) => {
         }
       });
 
-    // 3. Đặt hẹn giờ "Tự sát" sau 290 giây (để né giới hạn 305 giây)
-    restartTimeout = setTimeout(() => {
-        console.log("⏰ Đã đến giới hạn an toàn (290s). Đang tái khởi động stream...");
-        startStream();
-    }, 290000); 
+  restartTimeout = setTimeout(() => {
+        console.log("⏰ Đã đến giới hạn an toàn (290s). Yêu cầu Client reset...");
+        
+        // Gửi lệnh cho Client tự restart -> Client sẽ gửi lại 'start-google-stream' -> Tạo Header mới
+        socket.emit("force-client-restart"); 
+        
+        // Dọn dẹp stream phía server luôn
+        if (recognizeStream) {
+            recognizeStream.end();
+            recognizeStream = null;
+        }
+    }, 290000);
   };
 
   // --- XỬ LÝ SỰ KIỆN TỪ CLIENT ---
