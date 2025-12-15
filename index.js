@@ -13,7 +13,7 @@ if (!fs.existsSync(KEY_FILE_PATH)) {
 }
 
 const speechClient = new speech.SpeechClient({
-  keyFilename: KEY_FILE_PATH
+    keyFilename: KEY_FILE_PATH
 });
 
 const httpServer = http.createServer((req, res) => {
@@ -22,205 +22,179 @@ const httpServer = http.createServer((req, res) => {
 });
 
 const io = new Server(httpServer, {
-  cors: {
-    origin: "*", 
-    methods: ["GET", "POST"]
-  },
-  maxHttpBufferSize: 1e8
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    },
+    maxHttpBufferSize: 1e8
 });
 
 console.log(`🚀 Socket Server đang chạy trên cổng ${PORT}`);
 
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-  
-  let recognizeStream = null;
-  let restartTimeout = null;
-  let savedRequest = null; // Biến để lưu cấu hình, dùng cho việc restart
+    console.log("Client connected:", socket.id);
 
-  // --- HÀM KHỞI TẠO STREAM (Tách riêng để gọi lại) ---
-  const startStream = () => {
-    // 1. Dọn dẹp stream cũ (nếu có)
-    if (recognizeStream) {
-        recognizeStream.end();
-        recognizeStream.removeAllListeners();
-        recognizeStream = null;
-    }
-    if (restartTimeout) clearTimeout(restartTimeout);
+    let recognizeStream = null;
+    let restartTimeout = null;
+    let savedRequest = null; 
+    let webmHeader = null; // [MỚI] Biến để lưu Header của file WebM
 
-    console.log("🔄 (Re)Starting Google Stream...");
+    // --- HÀM KHỞI TẠO STREAM (Cơ chế Hot-Swap) ---
+    const startStream = () => {
+        console.log("🔄 (Re)Starting Google Stream...");
 
-    // 2. Tạo Stream mới
-    recognizeStream = speechClient
-      .streamingRecognize(savedRequest)
-      .on("error", (err) => {
-        // Nếu gặp lỗi quá hạn 305s (mã 11) -> Tự restart luôn
-        if (err.code === 11 || err.toString().includes("Exceeded maximum allowed stream duration")) {
-            console.warn("⚠️ Gặp lỗi giới hạn thời gian (305s), đang tự khởi động lại...");
-            startStream();
-        } else {
-            console.error("Google API Error:", err);
-            socket.emit("google-error", err.message);
+        // 1. Dọn dẹp stream cũ
+        if (recognizeStream) {
+            recognizeStream.end();
+            recognizeStream.removeAllListeners();
+            recognizeStream = null;
         }
-      })
-      .on("data", (data) => {
-        const result = data.results[0];
-        if (result && result.alternatives[0]) {
-            const transcript = result.alternatives[0].transcript;
-            const isFinal = result.isFinal;
-            
-            let speaker = 0;
-            const words = result.alternatives[0].words;
-            if (isFinal && words && words.length > 0) {
-                // Lấy speaker tag của từ cuối cùng cho chắc ăn
-                for (let i = words.length - 1; i >= 0; i--) {
-                    if (words[i].speakerTag) {
-                        speaker = words[i].speakerTag;
-                        break;
-                    }
+        if (restartTimeout) clearTimeout(restartTimeout);
+
+        // 2. Tạo Stream mới
+        recognizeStream = speechClient
+            .streamingRecognize(savedRequest)
+            .on("error", (err) => {
+                if (err.code === 11 || err.toString().includes("Exceeded maximum allowed stream duration")) {
+                    console.warn("⚠️ Google Stream hết hạn. Đang tái khởi động...");
+                    startStream(); 
+                } else {
+                    console.error("Google API Error:", err);
                 }
-            }
-           
-            socket.emit("transcript-data", { 
-                text: transcript, 
-                isFinal, 
-                speaker 
+            })
+            .on("data", (data) => {
+                const result = data.results[0];
+                if (result && result.alternatives[0]) {
+                    const transcript = result.alternatives[0].transcript;
+                    const isFinal = result.isFinal;
+                    let speaker = 0;
+                    const words = result.alternatives[0].words;
+                    if (isFinal && words && words.length > 0) {
+                         // Lấy speaker tag của từ cuối cùng
+                        for (let i = words.length - 1; i >= 0; i--) {
+                            if (words[i].speakerTag) {
+                                speaker = words[i].speakerTag;
+                                break;
+                            }
+                        }
+                    }
+                    socket.emit("transcript-data", { text: transcript, isFinal, speaker });
+                }
             });
-        }
-      });
 
-  restartTimeout = setTimeout(() => {
-        console.log("⏰ Đã đến giới hạn an toàn (290s). Yêu cầu Client reset...");
+        // [QUAN TRỌNG] Nếu đã có Header (từ lần start đầu tiên), phải bơm lại vào stream mới ngay!
+        if (webmHeader) {
+            // console.log("Injecting WebM Header into new stream...");
+            recognizeStream.write(webmHeader);
+        }
+
+        // 3. Hẹn giờ restart (290s)
+        restartTimeout = setTimeout(() => {
+            console.log("⏰ Đã đến giới hạn an toàn (290s). Server đang tự đổi Stream...");
+            startStream(); 
+        }, 290000); 
+    };
+
+    socket.on("start-google-stream", () => {
+        console.log("🎙️ Client bắt đầu ghi âm.");
         
-        // Gửi lệnh cho Client tự restart -> Client sẽ gửi lại 'start-google-stream' -> Tạo Header mới
-        socket.emit("force-client-restart"); 
-        
-        // Dọn dẹp stream phía server luôn
+        // Reset header mỗi khi bắt đầu phiên mới hoàn toàn
+        webmHeader = null;
+
+        savedRequest = {
+            config: {
+                encoding: "WEBM_OPUS",
+                sampleRateHertz: 48000,
+                languageCode: "vi-VN",
+                model: "latest_long",
+                enableWordTimeOffsets: true,
+            },
+            interimResults: true,
+        };
+
+        startStream();
+    });
+
+    socket.on("audio-chunk", (data) => {
+        // [MỚI] Lưu gói tin đầu tiên làm Header
+        if (!webmHeader) {
+            webmHeader = data;
+            // console.log("Đã lưu WebM Header:", data.length, "bytes");
+        }
+
+        if (recognizeStream && !recognizeStream.destroyed) {
+            try {
+                recognizeStream.write(data);
+            } catch (err) {
+                // Ignore write errors during swap
+            }
+        }
+    });
+
+    socket.on("stop-google-stream", () => {
+        if (restartTimeout) clearTimeout(restartTimeout);
         if (recognizeStream) {
             recognizeStream.end();
             recognizeStream = null;
         }
-    }, 290000);
-  };
+        webmHeader = null; // Xóa header khi dừng hẳn
+        console.log("🛑 Client dừng ghi âm.");
+    });
 
-  // --- XỬ LÝ SỰ KIỆN TỪ CLIENT ---
-
-  socket.on("start-google-stream", () => {
-    console.log("🎙️ Client yêu cầu bắt đầu ghi âm.");
-
-    // Lưu cấu hình vào biến global của socket này
-    savedRequest = {
-      config: {
-        encoding: "WEBM_OPUS",
-        sampleRateHertz: 48000,
-        languageCode: "vi-VN",
-        model: "latest_long",
-        // model: "default", // Bạn có thể đổi về default nếu thấy latest_long bị chậm
-       
-        enableWordTimeOffsets: true,
-      },
-      interimResults: true,
-    };
-
-    // Gọi hàm bắt đầu
-    startStream();
-  });
-
-  socket.on("audio-chunk", (data) => {
-    // Chỉ ghi nếu stream đang mở và chưa bị hủy
-    if (recognizeStream && !recognizeStream.destroyed) {
-        try {
-            recognizeStream.write(data);
+    // ... (Giữ nguyên phần Batch Analyze) ...
+    socket.on("google-batch-analyze", async (fileBuffer) => {
+         // (Code batch cũ của bạn giữ nguyên)
+         // ...
+         try {
+            console.log(`📥 Nhận yêu cầu Batch: ${fileBuffer.length} bytes`);
+            const audio = { content: fileBuffer.toString("base64") };
+            const config = {
+                encoding: "WEBM_OPUS",
+                sampleRateHertz: 48000,
+                languageCode: "vi-VN",
+                model: "latest_long",
+                enableSpeakerDiarization: true,
+                diarizationConfig: { minSpeakerCount: 1, maxSpeakerCount: 5 },
+            };
+            const request = { audio: audio, config: config };
+            const [operation] = await speechClient.longRunningRecognize(request);
+            console.log("⏳ Đang xử lý Batch...");
+            const [response] = await operation.promise();
+            
+            const result = response.results
+                .map(res => {
+                    const alt = res.alternatives[0];
+                    if (!alt.words || alt.words.length === 0) return "";
+                    let transcript = "";
+                    let currentSpeaker = -1;
+                    alt.words.forEach(word => {
+                        const spk = word.speakerTag;
+                        if (spk !== currentSpeaker) {
+                            transcript += `\n[Speaker ${spk}]: ${word.word}`;
+                            currentSpeaker = spk;
+                        } else {
+                            transcript += ` ${word.word}`;
+                        }
+                    });
+                    return transcript;
+                })
+                .join("\n");
+            console.log("✅ Batch hoàn tất!");
+            socket.emit("batch-complete", result);
         } catch (err) {
-            // Lỗi này thường xảy ra đúng lúc đang restart, bỏ qua được
-            // console.warn("⚠️ Lỗi ghi audio vào stream (đang restart?):", err.message);
+            console.error("❌ Lỗi Batch:", err);
+            socket.emit("google-error", "Lỗi xử lý Batch: " + err.message);
         }
-    }
-  });
+    });
 
-  socket.on("stop-google-stream", () => {
-    if (restartTimeout) clearTimeout(restartTimeout);
-    if (recognizeStream) {
-      recognizeStream.end();
-      recognizeStream = null;
-      console.log("🛑 Client dừng ghi âm.");
-    }
-  });
-
-  // ... (Phần xử lý Batch Analyze giữ nguyên code cũ của bạn) ...
-   socket.on("google-batch-analyze", async (fileBuffer) => {
-    console.log(`📥 Nhận yêu cầu Batch: ${fileBuffer.length} bytes`);
-
-    try {
-      const audio = {
-        content: fileBuffer.toString("base64"), // Google cần Base64
-      };
-
-      const config = {
-        encoding: "WEBM_OPUS",
-        sampleRateHertz: 48000,
-        languageCode: "vi-VN",
-        model: "latest_long", // Batch thì dùng model xịn nhất
-        enableSpeakerDiarization: true, // ✅ Batch HỖ TRỢ cái này!
-        diarizationConfig: {
-          minSpeakerCount: 1, // Tự động đoán số người
-          maxSpeakerCount: 5,
-        },
-      };
-
-      const request = {
-        audio: audio,
-        config: config,
-      };
-
-      // Dùng longRunningRecognize cho file dài (> 1 phút)
-      const [operation] = await speechClient.longRunningRecognize(request);
-      console.log("⏳ Đang xử lý Batch... (Vui lòng đợi)");
-
-      const [response] = await operation.promise();
-      
-      // Xử lý kết quả trả về
-      const result = response.results
-        .map(res => {
-            // Lấy từ cuối cùng (đầy đủ nhất) của mỗi đoạn
-            const alt = res.alternatives[0];
-            if (!alt.words || alt.words.length === 0) return "";
-            
-            // Gom nhóm các từ theo Speaker
-            let transcript = "";
-            let currentSpeaker = -1;
-            
-            alt.words.forEach(word => {
-                const spk = word.speakerTag;
-                if (spk !== currentSpeaker) {
-                    transcript += `\n[Speaker ${spk}]: ${word.word}`;
-                    currentSpeaker = spk;
-                } else {
-                    transcript += ` ${word.word}`;
-                }
-            });
-            return transcript;
-        })
-        .join("\n");
-
-      console.log("✅ Batch hoàn tất!");
-      console.log("📝 KẾT QUẢ BATCH:\n", result);
-      socket.emit("batch-complete", result);
-
-    } catch (err) {
-      console.error("❌ Lỗi Batch:", err);
-      socket.emit("google-error", "Lỗi xử lý Batch: " + err.message);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    if (restartTimeout) clearTimeout(restartTimeout);
-    if (recognizeStream) {
-      recognizeStream.end();
-      recognizeStream = null;
-    }
-    console.log("Client disconnected:", socket.id);
-  });
+    socket.on("disconnect", () => {
+        if (restartTimeout) clearTimeout(restartTimeout);
+        if (recognizeStream) {
+            recognizeStream.end();
+            recognizeStream = null;
+        }
+        console.log("Client disconnected:", socket.id);
+    });
 });
 
 httpServer.listen(PORT);
