@@ -65,21 +65,55 @@ io.on("connection", (socket) => {
             .on("data", (data) => {
                 const result = data.results[0];
                 if (result && result.alternatives[0]) {
-                    const transcript = result.alternatives[0].transcript;
+                    const alt = result.alternatives[0];
+                    const transcript = alt.transcript;
                     const isFinal = result.isFinal;
                     let speaker = 0;
-                    const words = result.alternatives[0].words;
-                    if (isFinal && words && words.length > 0) {
-                         // Lấy speaker tag của từ cuối cùng
-                        for (let i = words.length - 1; i >= 0; i--) {
-                            if (words[i].speakerTag) {
-                                speaker = words[i].speakerTag;
-                                break;
-                            }
+
+                    // [MỚI] Xử lý Words: Google trả về "0.5s" -> cần parse thành số 0.5
+                const parseTime = (t) => {
+                        if (!t) return 0;
+                        
+                        // 1. Trường hợp Google trả về Object { seconds: "1", nanos: 700000000 }
+                        if (typeof t === 'object') {
+                            const seconds = parseInt(t.seconds || "0");
+                            const nanos = t.nanos || 0;
+                            return seconds + (nanos / 1e9); // Chia 1 tỷ để đổi nano ra giây
                         }
+
+                        // 2. Trường hợp trả về số (ví dụ: 1.5)
+                        if (typeof t === 'number') return t;
+                        
+                        // 3. Trường hợp trả về chuỗi (ví dụ: "1.5s")
+                        if (typeof t === 'string') {
+                             return parseFloat(t.replace('s', ''));
+                        }
+
+                        return 0;
+                    };
+
+            const rawWords = alt.words || [];
+            const processedWords = rawWords.map(w => ({
+                word: w.word,
+                // Dùng hàm parseTime thay vì gọi trực tiếp .replace
+                start: parseTime(w.startTime),
+                end: parseTime(w.endTime)
+            }));
+                    if (isFinal && rawWords.length > 0) {
+                    for (let i = rawWords.length - 1; i >= 0; i--) {
+                        if (rawWords[i].speakerTag) {
+                            speaker = rawWords[i].speakerTag;
+                            break;
+                        }
+                     }
                     }
-                    socket.emit("transcript-data", { text: transcript, isFinal, speaker });
-                }
+                    socket.emit("transcript-data", { 
+                        text: transcript, 
+                        isFinal, 
+                        speaker,
+                        words: processedWords // <--- Dữ liệu quan trọng để làm Karaoke
+                     });
+                    }
             });
 
         // [QUAN TRỌNG] Nếu đã có Header (từ lần start đầu tiên), phải bơm lại vào stream mới ngay!
