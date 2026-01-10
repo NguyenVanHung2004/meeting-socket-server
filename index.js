@@ -8,9 +8,9 @@ const http = require("http");
 const PORT = process.env.PORT || 8080;
 const KEY_FILE_PATH = path.join(__dirname, "google-key.json");
 
-if (!fs.existsSync(KEY_FILE_PATH)) {
-    console.error("❌ LỖI: Không tìm thấy file google-key.json!");
-}
+// if (!fs.existsSync(KEY_FILE_PATH)) {
+//     console.error("❌ LỖI: Không tìm thấy file google-key.json!");
+// }
 
 const speechClient = new speech.SpeechClient({
     credentials: JSON.parse(process.env.GOOGLE_KEY)
