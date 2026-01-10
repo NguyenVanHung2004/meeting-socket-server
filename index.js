@@ -13,8 +13,9 @@ if (!fs.existsSync(KEY_FILE_PATH)) {
 }
 
 const speechClient = new speech.SpeechClient({
-    keyFilename: KEY_FILE_PATH
+    credentials: JSON.parse(process.env.GOOGLE_KEY)
 });
+
 
 const httpServer = http.createServer((req, res) => {
     res.writeHead(200);
