@@ -139,7 +139,7 @@ io.on("connection", (socket) => {
         savedRequest = {
             config: {
                 encoding: "WEBM_OPUS",
-                sampleRateHertz: 48000,
+                // sampleRateHertz: 48000,
                 languageCode: "vi-VN",
                 model: "latest_long",
                 enableWordTimeOffsets: true,
@@ -185,7 +185,7 @@ io.on("connection", (socket) => {
             const audio = { content: fileBuffer.toString("base64") };
             const config = {
                 encoding: "WEBM_OPUS",
-                sampleRateHertz: 48000,
+                // sampleRateHertz: 48000,
                 languageCode: "vi-VN",
                 model: "latest_long",
                 enableSpeakerDiarization: true,
